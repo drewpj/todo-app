@@ -854,18 +854,26 @@ This checklist exists so implementation can pause and resume across sessions (e.
 ### Session Notes
 *(Update this block at the end of each work session: 2–3 sentences on current state, what's next, and any blockers. Overwrite previous notes — this reflects the latest state, not a log.)*
 
-> **Last updated:** _(not yet started)_
-> **Status:** _(not yet started)_
-> **Next step:** _(not yet started)_
-> **Blockers:** _(none yet)_
+> **Last updated:** 2026-06-26
+> **Status:** Backend Foundation complete on branch `feature/backend-foundation`. .NET 9 Web API scaffolded, EF Core + SQLite configured with Fluent API entity configs, and `InitialCreate` migration committed (3 logical commits). Awaiting user review before proceeding.
+> **Next step:** Auth section — `PasswordHasher<T>`, JWT config, and the three auth endpoints (`POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`).
+> **Blockers:** None.
 
 ### Checklist
 
 **Backend Foundation**
-- [ ] .NET 9 Web API project scaffolded (Section 8 folder structure)
-- [ ] EF Core + SQLite configured, `AppDbContext` created (Section 4, Section 8)
-- [ ] `User` and `TaskItem` entities + Fluent API configurations (Section 4, Section 8)
-- [ ] Initial migration generated and committed (Section 8)
+- [x] .NET 9 Web API project scaffolded (Section 8 folder structure)
+- [x] EF Core + SQLite configured, `AppDbContext` created (Section 4, Section 8)
+- [x] `User` and `TaskItem` entities + Fluent API configurations (Section 4, Section 8)
+- [x] Initial migration generated and committed (Section 8)
+
+**Backend Foundation — Summary (completed 2026-06-26)**
+- Single `TodoApp.Api` project with all spec folders (`Controllers/`, `Services/`, `Repositories/`, `Models/`, `DTOs/`, `Data/Configurations/`, `Exceptions/`, `Migrations/`).
+- `User` and `TaskItem` entities with all spec fields; `TaskStatus`/`TaskPriority` enums (int-backed, as specified).
+- Fluent API configs (`UserConfiguration`, `TaskConfiguration`): unique index on `Username`, index on `TaskItem.UserId`, cascade delete, `IsDeleted` default `false`. `Status`/`Priority` defaults are C#-level (entity initializers) rather than DB column defaults — avoids EF sentinel-value ambiguity with 0-valued enum.
+- `AppDbContext` uses `ApplyConfigurationsFromAssembly`.
+- `InitialCreate` migration committed; `db.Database.Migrate()` called on startup.
+- No deviations from spec.
 
 **Auth**
 - [ ] Password hashing via `PasswordHasher<T>` (Section 6)
