@@ -1,0 +1,19 @@
+Set-Content -Path .gitignore -Value @"
+# .NET Build artifacts
+bin/
+obj/
+*.user
+*.suo
+appsettings.Development.json
+
+# Node / Vue Build artifacts
+node_modules/
+dist/
+.env
+.env.local
+
+# Local SQLite databases
+*.db
+*.db-journal
+*.db-wal
+"@
