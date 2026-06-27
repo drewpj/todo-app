@@ -855,8 +855,8 @@ This checklist exists so implementation can pause and resume across sessions (e.
 *(Update this block at the end of each work session: 2–3 sentences on current state, what's next, and any blockers. Overwrite previous notes — this reflects the latest state, not a log.)*
 
 > **Last updated:** 2026-06-26
-> **Status:** Backend Foundation complete on branch `feature/backend-foundation`. .NET 9 Web API scaffolded, EF Core + SQLite configured with Fluent API entity configs, and `InitialCreate` migration committed (3 logical commits). Awaiting user review before proceeding.
-> **Next step:** Auth section — `PasswordHasher<T>`, JWT config, and the three auth endpoints (`POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`).
+> **Status:** Auth section complete on branch `feature/backend-foundation`. All three auth endpoints live and smoke-tested; standardized error shape returned for all cases including missing/invalid JWT tokens (required a `JwtBearerEvents.OnChallenge` override since the JWT middleware short-circuits before `IExceptionHandler`).
+> **Next step:** Task CRUD — `ITaskRepository`/`TaskRepository`, `ITaskService`/`TaskService` (with ownership enforcement), and `TasksController` (GET list, GET by id, POST, PUT, DELETE).
 > **Blockers:** None.
 
 ### Checklist
@@ -876,11 +876,19 @@ This checklist exists so implementation can pause and resume across sessions (e.
 - No deviations from spec.
 
 **Auth**
-- [ ] Password hashing via `PasswordHasher<T>` (Section 6)
-- [ ] JWT generation/validation configured, incl. Issuer/Audience checks (Section 6)
-- [ ] `POST /api/auth/register` implemented (Section 5)
-- [ ] `POST /api/auth/login` implemented (Section 5)
-- [ ] `GET /api/auth/me` implemented (Section 5)
+- [x] Password hashing via `PasswordHasher<T>` (Section 6)
+- [x] JWT generation/validation configured, incl. Issuer/Audience checks (Section 6)
+- [x] `POST /api/auth/register` implemented (Section 5)
+- [x] `POST /api/auth/login` implemented (Section 5)
+- [x] `GET /api/auth/me` implemented (Section 5)
+
+**Auth — Summary (completed 2026-06-26)**
+- `AppException` base class with `Code` string; `NotFoundException`, `UnauthorizedException`, `ConflictException` subclasses throw from Service layer.
+- `GlobalExceptionHandler` (`IExceptionHandler`) maps exceptions to HTTP status codes and writes the Section 5 error shape (`code`, `message`, `details`, `traceId`, `correlationId`). `InvalidModelStateResponseFactory` configured so model-validation failures also use the same shape with `details` array.
+- JWT: HMAC-SHA256, `sub`+`username` claims, 1-hour expiry, `Issuer`/`Audience` validated. Key/issuer/audience from config (`Jwt:Secret`, `Jwt:Issuer`, `Jwt:Audience`). Dev defaults in `appsettings.json`; Docker env vars override them.
+- `PasswordHasher<User>` registered as Singleton and injected into `AuthService`; same hash path used for both registration and seeding.
+- **Deviation from spec (minor):** JWT middleware short-circuits the pipeline for missing/invalid tokens before `IExceptionHandler` is invoked, so a `JwtBearerEvents.OnChallenge` override was added in Program.cs to ensure those 401s also use the standardized error shape. This is not described in the spec but is necessary for consistent behavior.
+- Minimum password length: 6 characters (spec says "minimum-length only" without specifying the exact minimum; 6 is a common reasonable default).
 
 **Task CRUD**
 - [ ] `TaskService` with ownership enforcement (Section 6)
