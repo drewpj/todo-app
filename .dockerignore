@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+todo-frontend/node_modules/
+todo-frontend/dist/
+.env
+.git/
