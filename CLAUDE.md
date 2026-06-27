@@ -50,8 +50,11 @@ Once scaffolded, this section should be filled in with the actual commands (e.g.
 # Run everything locally:
 docker-compose up --build
 
-# Backend tests:
-(TBD once backend project exists)
+# Backend build:
+cd TodoApp.Api && dotnet build
+
+# Backend tests (once test projects exist):
+dotnet test
 
 # Frontend dev server (outside Docker, for faster iteration):
 (TBD once frontend project exists)
