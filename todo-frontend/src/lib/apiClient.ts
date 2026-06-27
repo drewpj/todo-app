@@ -13,7 +13,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Correlation-Id': crypto.randomUUID(),
+  }
   const token = localStorage.getItem('token')
   if (token) headers['Authorization'] = `Bearer ${token}`
 

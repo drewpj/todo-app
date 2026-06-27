@@ -547,7 +547,9 @@ const {
 Each action calls the corresponding API endpoint (Section 5), updates `isLoading`/`error` appropriately, and refreshes `tasks` on success.
 
 ### API communication
-A small shared fetch wrapper (e.g., `apiClient.js`) centralizes: base URL configuration, attaching the `Authorization: Bearer <token>` header (reading from `useAuth()`/localStorage), and parsing the standardized error shape (Section 5) into a consistent JS error object. Both composables use this wrapper rather than calling `fetch` directly, so header/error-handling logic isn't duplicated.
+A small shared fetch wrapper (e.g., `apiClient.js`) centralizes: base URL configuration, attaching the `Authorization: Bearer <token>` header (reading from `useAuth()`/localStorage), generating and attaching a per-request `X-Correlation-Id` header, and parsing the standardized error shape (Section 5) into a consistent JS error object. Both composables use this wrapper rather than calling `fetch` directly, so header/error-handling logic isn't duplicated.
+
+**Correlation ID on outbound requests**: the fetch wrapper generates a UUID via `crypto.randomUUID()` for every API call and sends it as `X-Correlation-Id`. The backend middleware reads this header and uses it as the `correlationId` for all log entries and the error response body (Section 8 — Request logging). This means if the frontend logs or surfaces the correlationId from an error response, a developer can grep backend logs for that exact ID and find the corresponding request immediately. One UUID is generated per API call (not per user action); this is sufficient since no single user action fans out to multiple parallel requests.
 
 ### UI states
 For the task list and forms, the following states are required (cheap to implement, expected for "production-ready" framing):
@@ -613,6 +615,34 @@ Business-rule errors are represented as small custom exception types, thrown fro
 ### Global error handling
 Implemented using ASP.NET Core's `IExceptionHandler` (the modern .NET 8+ pattern), registered once in `Program.cs`. This single handler catches the custom exceptions above (and any unhandled exception, mapped to a generic 500) and produces the standardized error response shape from Section 5, including `traceId` (from `HttpContext.TraceIdentifier`) and `correlationId` (echoed from the `X-Correlation-Id` header or generated). No controller contains its own try/catch for these cases.
 
+Every exception processed by the handler is logged at `Warning` level (for handled app exceptions) or `Error` level (for unhandled 500s), including both `traceId` and `correlationId` as structured log fields alongside the HTTP status code and error code. This means every error response the client receives can be cross-referenced to a server log line by either ID.
+
+### Request logging
+
+To trace the full path of a request through the system, a custom `RequestLoggingMiddleware` class is registered in `Program.cs` early in the pipeline (before auth and routing). It is responsible for:
+
+1. **Resolving the correlationId** — reads `X-Correlation-Id` from the incoming request header; if absent, generates a new UUID. Stores it on `HttpContext.Items` so downstream code (including the exception handler) can retrieve it without re-reading the header.
+2. **Logging request start** — emits a structured log at `Information` level with: HTTP method, path, `traceId` (`HttpContext.TraceIdentifier`), `correlationId`.
+3. **Calling `next()`** — passes control down the pipeline.
+4. **Logging request end** — after `next()` returns, emits a structured log at `Information` level with: HTTP method, path, response status code, elapsed milliseconds, `traceId`, `correlationId`.
+
+Log fields use consistent names (`traceId`, `correlationId`, `method`, `path`, `statusCode`, `elapsedMs`) so the entries are grep-able in Docker logs and forward-compatible with a structured logging sink (Section 13).
+
+Example log output for a successful request:
+```
+info: RequestLoggingMiddleware  Request  POST /api/auth/login traceId=0HN...:00000001 correlationId=a1b2-...
+info: RequestLoggingMiddleware  Response POST /api/auth/login 200 42ms traceId=0HN...:00000001 correlationId=a1b2-...
+```
+
+Example for a failed request (the middleware log line is followed by the exception handler's warning):
+```
+info:  RequestLoggingMiddleware  Request  GET /api/tasks/999 traceId=0HN...:00000002 correlationId=b2c3-...
+warn:  GlobalExceptionHandler    NOT_FOUND 404 GET /api/tasks/999 traceId=0HN...:00000002 correlationId=b2c3-...
+info:  RequestLoggingMiddleware  Response GET /api/tasks/999 404 5ms traceId=0HN...:00000002 correlationId=b2c3-...
+```
+
+**What this does not replace**: ASP.NET Core's built-in host-level request logging (`Microsoft.AspNetCore.Hosting`) still runs — it logs the same request/response at its own level. If the noise is unwanted, suppress it in `appsettings.json` by setting `Microsoft.AspNetCore.Hosting` log level to `Warning`. The custom middleware is the authoritative source of per-request context (correlationId, traceId) in structured fields; the built-in log does not include those.
+
 ### Demo data seeding (important — do not use `HasData`)
 The demo user and sample tasks (Section 11) must be seeded by running real application logic in `Program.cs` at startup, **after** the DI container is built and **after** migrations are applied — not via EF Core's `HasData()` in `OnModelCreating`.
 
@@ -638,9 +668,10 @@ Kept as wire-up only, no business logic:
 4. Configure the CORS policy (Section 3) to allow the frontend's origin
 5. Register the global exception handler (`IExceptionHandler`)
 6. Register Swagger/OpenAPI generation (`Swashbuckle.AspNetCore`), including JWT Bearer support in the Swagger UI
-7. Apply pending EF Core migrations on startup (`db.Database.Migrate()`)
-8. Seed a demo user (and a few sample tasks) on startup if none exists, via a DI scope resolved **after** migration — never via `HasData()` (see "Demo data seeding" above; full content requirements in Section 11)
-9. Map controllers, run the app
+7. Register `RequestLoggingMiddleware` early in the pipeline (before auth and routing) — see "Request logging" above
+8. Apply pending EF Core migrations on startup (`db.Database.Migrate()`)
+9. Seed a demo user (and a few sample tasks) on startup if none exists, via a DI scope resolved **after** migration — never via `HasData()` (see "Demo data seeding" above; full content requirements in Section 11)
+10. Map controllers, run the app
 
 ## 9. Docker & Local Setup
 
