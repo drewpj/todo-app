@@ -8,7 +8,7 @@ namespace TodoApp.Api.Services;
 
 public class TaskService(ITaskRepository taskRepo) : ITaskService
 {
-    private static readonly string[] ValidSortBy = ["dueDate", "priority", "createdAt"];
+    private static readonly string[] ValidSortBy = ["dueDate", "priority", "createdAt", "title"];
     private static readonly string[] ValidSortOrder = ["asc", "desc"];
 
     public async Task<TaskListResponse> GetTasksAsync(
@@ -25,7 +25,7 @@ public class TaskService(ITaskRepository taskRepo) : ITaskService
 
         var resolvedSortBy = sortBy ?? "createdAt";
         if (!ValidSortBy.Contains(resolvedSortBy))
-            throw new ValidationException("sortBy", "sortBy must be one of: dueDate, priority, createdAt.");
+            throw new ValidationException("sortBy", "sortBy must be one of: createdAt, dueDate, priority, title.");
 
         var resolvedSortOrder = sortOrder ?? "desc";
         if (!ValidSortOrder.Contains(resolvedSortOrder))
