@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: TodoApp.Api/Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - ConnectionStrings__Default=Data Source=/data/todo.db
+      - Jwt__Secret=${JWT_SECRET:-dev-secret-change-in-production-min-32-chars}
+      - Jwt__Issuer=${JWT_ISSUER:-TodoApp}
+      - Jwt__Audience=${JWT_AUDIENCE:-TodoApp}
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Production}
+    volumes:
+      - db_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./todo-frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:5000}
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  db_data:

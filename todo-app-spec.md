@@ -854,9 +854,9 @@ This checklist exists so implementation can pause and resume across sessions (e.
 ### Session Notes
 *(Update this block at the end of each work session: 2–3 sentences on current state, what's next, and any blockers. Overwrite previous notes — this reflects the latest state, not a log.)*
 
-> **Last updated:** 2026-06-26
-> **Status:** Auth section complete on branch `feature/backend-foundation`. All three auth endpoints live and smoke-tested; standardized error shape returned for all cases including missing/invalid JWT tokens (required a `JwtBearerEvents.OnChallenge` override since the JWT middleware short-circuits before `IExceptionHandler`).
-> **Next step:** Task CRUD — `ITaskRepository`/`TaskRepository`, `ITaskService`/`TaskService` (with ownership enforcement), and `TasksController` (GET list, GET by id, POST, PUT, DELETE).
+> **Last updated:** 2026-06-27
+> **Status:** All implementation complete on branch `feature/backend-foundation`. Backend (Task CRUD, tests, cross-cutting), frontend (all views/components/composables), Docker Compose, and README are done. 30/30 tests passing (22 unit + 8 integration).
+> **Next step:** Verify `docker-compose up --build` end-to-end from a clean clone, then push branch, open PR, and get repo link ready for submission.
 > **Blockers:** None.
 
 ### Checklist
@@ -891,46 +891,77 @@ This checklist exists so implementation can pause and resume across sessions (e.
 - Minimum password length: 6 characters (spec says "minimum-length only" without specifying the exact minimum; 6 is a common reasonable default).
 
 **Task CRUD**
-- [ ] `TaskService` with ownership enforcement (Section 6)
-- [ ] `GET /api/tasks` (filter/sort) implemented (Section 5)
-- [ ] `GET /api/tasks/{id}` implemented (Section 5)
-- [ ] `POST /api/tasks` implemented (Section 5)
-- [ ] `PUT /api/tasks/{id}` implemented (Section 5)
-- [ ] `DELETE /api/tasks/{id}` (soft delete) implemented (Section 5)
+- [x] `TaskService` with ownership enforcement (Section 6)
+- [x] `GET /api/tasks` (filter/sort) implemented (Section 5)
+- [x] `GET /api/tasks/{id}` implemented (Section 5)
+- [x] `POST /api/tasks` implemented (Section 5)
+- [x] `PUT /api/tasks/{id}` implemented (Section 5)
+- [x] `DELETE /api/tasks/{id}` (soft delete) implemented (Section 5)
+
+**Task CRUD — Summary (completed 2026-06-26)**
+- `ITaskRepository`/`TaskRepository`: IQueryable chain filtering by `UserId`+`!IsDeleted`, optional `status` filter, switch-expression sort on `createdAt`/`dueDate`/`priority`/`title` with `asc`/`desc` direction.
+- `ITaskService`/`TaskService`: `GetOwnedTaskAsync` helper returns 404 for non-existent, soft-deleted, or cross-user tasks (no resource-existence leakage). `DeleteAsync` sets `IsDeleted=true` + updates `UpdatedAt`. Query param validation throws `ValidationException`.
+- `TasksController`: class-level `[Authorize]`, `GetUserId()` helper reads from `ClaimTypes.NameIdentifier`. All five task endpoints.
+- `JsonStringEnumConverter` registered globally so `Status`/`Priority` serialize as strings.
+- UTC DateTime fix: `UtcDateTimeConverter` and `NullableUtcDateTimeConverter` in `AppDbContext.ConfigureConventions` ensure `Kind=Utc` on all DateTime reads from SQLite.
+- Demo user + 4 sample tasks seeded in `Program.cs` after `db.Database.Migrate()`.
 
 **Cross-cutting backend**
-- [ ] Global exception handler (`IExceptionHandler`) + standardized error shape, incl. `traceId`/`correlationId` (Section 5, Section 8)
-- [ ] Swagger/OpenAPI configured with JWT support (Section 8, Section 11)
-- [ ] CORS configured for frontend origin (Section 3)
-- [ ] Demo user + sample task seeding on startup (Section 11)
-- [ ] `/health` endpoint for Docker healthcheck (Section 9)
+- [x] Global exception handler (`IExceptionHandler`) + standardized error shape, incl. `traceId`/`correlationId` (Section 5, Section 8)
+- [x] Swagger/OpenAPI configured with JWT support (Section 8, Section 11)
+- [x] CORS configured for frontend origin (Section 3)
+- [x] Demo user + sample task seeding on startup (Section 11)
+- [x] `/health` endpoint for Docker healthcheck (Section 9)
 
 **Backend Tests**
-- [ ] `AuthService` unit tests (Section 10 test list)
-- [ ] `TaskService` unit tests (Section 10 test list)
-- [ ] Integration tests — full lifecycle + negative cases, using a correctly-scoped test database per Section 10's DB lifetime guidance
+- [x] `AuthService` unit tests (Section 10 test list)
+- [x] `TaskService` unit tests (Section 10 test list)
+- [x] Integration tests — full lifecycle + negative cases, using a correctly-scoped test database per Section 10's DB lifetime guidance
+
+**Backend Tests — Summary (completed 2026-06-26)**
+- `TodoApp.Api.UnitTests`: hand-written `FakeUserRepository` and `FakeTaskRepository` (in-memory, auto-incrementing IDs, same sort logic as real repo). 7 `AuthServiceTests` + 15 `TaskServiceTests` = 22 unit tests, all passing.
+- `TodoApp.Api.IntegrationTests`: `TestWebAppFactory` replaces DbContext with a temp-file SQLite database per startup. `AuthIntegrationTests` (5 tests) + `TaskLifecycleTests` (3 tests) = 8 integration tests, all passing. `JsonStringEnumConverter` required in test deserializer options.
+- `public partial class Program {}` added at end of `Program.cs` so `WebApplicationFactory<Program>` can access the class.
 
 **Frontend**
-- [ ] Vue 3 + TypeScript project scaffolded via Vite (npm), routing + navigation guards configured (Section 7)
-- [ ] `useAuth()` composable implemented (Section 7)
-- [ ] `useTasks()` composable implemented (Section 7)
-- [ ] `apiClient` wrapper implemented (Section 7)
-- [ ] `LoginView` / `RegisterView` implemented (Section 7)
-- [ ] `TaskListView` + `AppHeader` + `TaskFilters` + `TaskList` + `TaskItem` implemented (Section 7)
-- [ ] `TaskFormModal` (shared create/edit) implemented (Section 7)
-- [ ] Loading/empty/error states implemented (Section 7)
+- [x] Vue 3 + TypeScript project scaffolded via Vite (npm), routing + navigation guards configured (Section 7)
+- [x] `useAuth()` composable implemented (Section 7)
+- [x] `useTasks()` composable implemented (Section 7)
+- [x] `apiClient` wrapper implemented (Section 7)
+- [x] `LoginView` / `RegisterView` implemented (Section 7)
+- [x] `TaskListView` + `AppHeader` + `TaskFilters` + `TaskList` + `TaskItem` implemented (Section 7)
+- [x] `TaskFormModal` (shared create/edit) implemented (Section 7)
+- [x] Loading/empty/error states implemented (Section 7)
+
+**Frontend — Summary (completed 2026-06-27)**
+- `src/types/api.ts`: TypeScript interfaces/types for `User`, `Task`, `TaskRequest`, `AuthResponse`, `TaskListResponse`, `TaskStatus`, `TaskPriority`.
+- `src/lib/apiClient.ts`: fetch wrapper with auth header injection from localStorage, `ApiError` class for structured error access.
+- `src/composables/useAuth.ts`: module-level `user` and `token` refs (no Pinia); `register`, `login`, `logout`, `restoreSession` methods.
+- `src/composables/useTasks.ts`: module-level `tasks`, `isLoading`, `error` refs; `fetchTasks`, `createTask`, `updateTask`, `deleteTask`.
+- `src/router/index.ts`: `createWebHistory` router; `requiresAuth` meta guard redirects unauthenticated users to `/login`; logged-in users redirected away from `/login`/`/register`.
+- `App.vue` calls `restoreSession` on mount (validates stored token against `/api/auth/me`).
+- Views: `LoginView`, `RegisterView` (with per-field error display), `TaskListView` (filter/sort, new task button, delete confirm).
+- Components: `AppHeader` (logo, username, sign out), `TaskFilters` (status/sortBy/sortOrder selects), `TaskList`, `TaskItem` (overdue highlighting, status/priority badges), `TaskFormModal` (shared create/edit form).
+- `vite.config.ts`: explicit port 5173. `VITE_API_BASE_URL` env var controls API base URL.
 
 **Docker & Infra**
-- [ ] Backend `Dockerfile` (multi-stage) (Section 9)
-- [ ] Frontend `Dockerfile` (multi-stage, nginx, with SPA fallback routing — Section 9)
-- [ ] `docker-compose.yml` with both services, named volume, healthcheck (Section 9)
-- [ ] `.env.example` committed (Section 9)
+- [x] Backend `Dockerfile` (multi-stage) (Section 9)
+- [x] Frontend `Dockerfile` (multi-stage, nginx, with SPA fallback routing — Section 9)
+- [x] `docker-compose.yml` with both services, named volume, healthcheck (Section 9)
+- [x] `.env.example` committed (Section 9)
 - [ ] Verified `docker-compose up --build` works end-to-end from a clean clone
 
+**Docker & Infra — Summary (completed 2026-06-27)**
+- `TodoApp.Api/Dockerfile`: multi-stage (`sdk:9.0` → `aspnet:9.0`), copies `.csproj` first for layer caching, `dotnet publish -c Release`.
+- `todo-frontend/Dockerfile`: multi-stage (`node:22-alpine` → `nginx:alpine`), accepts `VITE_API_BASE_URL` build arg, copies `nginx.conf`.
+- `todo-frontend/nginx.conf`: SPA fallback (`try_files $uri $uri/ /index.html`), 1-year cache headers for static assets.
+- `docker-compose.yml`: backend port 5000, frontend port 5173→80, `db_data` named volume, `wget`-based healthcheck, `depends_on: condition: service_healthy`.
+- `.env.example` at repo root with all overridable env vars; `.env` is gitignored.
+
 **Documentation**
-- [ ] `README.md` written per Section 11's required sections
-- [ ] Inline code comments added for non-obvious decisions (Section 11)
-- [ ] This spec reviewed and updated for any decisions that diverged during implementation
+- [x] `README.md` written per Section 11's required sections
+- [x] Inline code comments added for non-obvious decisions (Section 11)
+- [x] This spec reviewed and updated for any decisions that diverged during implementation
 
 **Final Submission**
 - [ ] Repo pushed to GitHub, both frontend/backend present
