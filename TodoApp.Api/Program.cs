@@ -205,3 +205,6 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 app.MapControllers();
 
 app.Run();
+
+// Required so WebApplicationFactory<Program> in integration tests can reference this class
+public partial class Program { }
