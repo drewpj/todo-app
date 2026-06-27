@@ -72,6 +72,28 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             IssuerSigningKey = new SymmetricSecurityKey(
                 Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Secret"]!))
         };
+        // JWT middleware short-circuits before IExceptionHandler for 401 challenges;
+        // override here so missing/invalid tokens also use the standardized error shape.
+        options.Events = new JwtBearerEvents
+        {
+            OnChallenge = async ctx =>
+            {
+                ctx.HandleResponse();
+                var correlationId = ctx.HttpContext.Request.Headers["X-Correlation-Id"].FirstOrDefault()
+                    ?? Guid.NewGuid().ToString();
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                await ctx.Response.WriteAsJsonAsync(new ErrorResponse
+                {
+                    Error = new ErrorDetail
+                    {
+                        Code = "UNAUTHORIZED",
+                        Message = "Authentication is required. Provide a valid Bearer token.",
+                        TraceId = ctx.HttpContext.TraceIdentifier,
+                        CorrelationId = correlationId
+                    }
+                });
+            }
+        };
     });
 builder.Services.AddAuthorization();
 
