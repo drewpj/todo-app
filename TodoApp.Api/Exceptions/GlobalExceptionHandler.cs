@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Diagnostics;
 using TodoApp.Api.DTOs;
+using TodoApp.Api.Middleware;
 
 namespace TodoApp.Api.Exceptions;
 
@@ -42,12 +43,28 @@ public class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logger) : IE
                 statusCode = StatusCodes.Status500InternalServerError;
                 code = "INTERNAL_ERROR";
                 message = "An unexpected error occurred.";
-                logger.LogError(exception, "Unhandled exception");
                 break;
         }
 
-        var correlationId = httpContext.Request.Headers["X-Correlation-Id"].FirstOrDefault()
+        var correlationId = httpContext.Items[RequestLoggingMiddleware.CorrelationIdKey] as string
+            ?? httpContext.Request.Headers["X-Correlation-Id"].FirstOrDefault()
             ?? Guid.NewGuid().ToString();
+
+        var traceId = httpContext.TraceIdentifier;
+
+        if (statusCode >= 500)
+        {
+            logger.LogError(
+                exception,
+                "Unhandled exception: {Code} {StatusCode} {Method} {Path} traceId={TraceId} correlationId={CorrelationId}",
+                code, statusCode, httpContext.Request.Method, httpContext.Request.Path, traceId, correlationId);
+        }
+        else
+        {
+            logger.LogWarning(
+                "{Code} {StatusCode} {Method} {Path} traceId={TraceId} correlationId={CorrelationId}",
+                code, statusCode, httpContext.Request.Method, httpContext.Request.Path, traceId, correlationId);
+        }
 
         httpContext.Response.StatusCode = statusCode;
         await httpContext.Response.WriteAsJsonAsync(new ErrorResponse
@@ -57,7 +74,7 @@ public class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logger) : IE
                 Code = code,
                 Message = message,
                 Details = details,
-                TraceId = httpContext.TraceIdentifier,
+                TraceId = traceId,
                 CorrelationId = correlationId
             }
         }, cancellationToken);

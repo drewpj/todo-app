@@ -10,6 +10,7 @@ using TodoApp.Api.Data;
 using TodoApp.Api.DTOs;
 using TodoApp.Api.Exceptions;
 using TodoApp.Api.Models;
+using TodoApp.Api.Middleware;
 using TodoApp.Api.Repositories;
 using TodoApp.Api.Services;
 using TaskPriority = TodoApp.Api.Models.TaskPriority;
@@ -25,7 +26,8 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
 {
     options.InvalidModelStateResponseFactory = ctx =>
     {
-        var correlationId = ctx.HttpContext.Request.Headers["X-Correlation-Id"].FirstOrDefault()
+        var correlationId = ctx.HttpContext.Items[RequestLoggingMiddleware.CorrelationIdKey] as string
+            ?? ctx.HttpContext.Request.Headers["X-Correlation-Id"].FirstOrDefault()
             ?? Guid.NewGuid().ToString();
 
         var details = ctx.ModelState
@@ -82,7 +84,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             OnChallenge = async ctx =>
             {
                 ctx.HandleResponse();
-                var correlationId = ctx.HttpContext.Request.Headers["X-Correlation-Id"].FirstOrDefault()
+                var correlationId = ctx.HttpContext.Items[RequestLoggingMiddleware.CorrelationIdKey] as string
+                    ?? ctx.HttpContext.Request.Headers["X-Correlation-Id"].FirstOrDefault()
                     ?? Guid.NewGuid().ToString();
                 ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 await ctx.Response.WriteAsJsonAsync(new ErrorResponse
@@ -146,6 +149,7 @@ builder.Services.AddScoped<ITaskService, TaskService>();
 var app = builder.Build();
 
 app.UseExceptionHandler();
+app.UseMiddleware<RequestLoggingMiddleware>();
 
 // Apply migrations and seed demo data on startup
 using (var scope = app.Services.CreateScope())
