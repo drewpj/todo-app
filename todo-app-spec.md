@@ -3,9 +3,7 @@
 ## 1. Overview & Goals
 
 ### Purpose of this document
-This is an implementation specification for a take-home coding exercise. It is written primarily **for an implementing coding agent** (e.g., Claude Code) to build the application end-to-end with minimal need for clarifying questions. All architecture, data model, and API decisions below are intentionally explicit and final for this version of the spec — ambiguities encountered during implementation should default to the choices documented here rather than agent judgment. Where a decision was deliberately deferred or simplified, that is called out explicitly in **Section 12 (Assumptions & Trade-offs)** and/or **Section 13 (Future Work)**, so a human reviewer can see that it was a conscious choice rather than an oversight.
-
-Secondary audiences are the person commissioning this work (who may review or resume implementation across sessions) and, ultimately, the technical reviewers at the hiring company who will read the resulting code and README.
+This is the design and implementation specification for a multi-user to-do task management app. It documents the full API contract, data model, architecture decisions, testing strategy, and key trade-offs made during development. All major decisions are recorded here with their rationale so that every non-obvious choice is explicit and traceable. Where a decision was deliberately deferred or simplified, that is called out in **Section 12 (Assumptions & Trade-offs)** and/or **Section 13 (Future Work)**, so a reviewer can see it was a conscious choice rather than an oversight.
 
 ### What we're building
 A small multi-user to-do task management application: users can register, log in, and manage their own list of tasks (create, read, update, delete, mark complete) via a Vue frontend communicating with a .NET Core Web API backend, persisted in SQLite via EF Core.
@@ -71,7 +69,7 @@ Prefer simple, defensible decisions that are clearly explained over complex ones
 - Pagination on the task list (filtering and sorting are in scope; pagination is deferred)
 
 **Operations & Infrastructure**
-- Centralized logging / observability tooling (e.g., Serilog, Application Insights) — logging is discussed as a future consideration in the README, but not implemented
+- Centralized logging sink / observability tooling (e.g., Serilog, Application Insights) — per-request structured logging (correlationId, traceId, method, path, status, elapsed) is implemented via custom middleware; what is deferred is shipping those log lines to an external sink or aggregation platform
 - Rate limiting / throttling
 - Real production deployment (cloud hosting, CI/CD pipeline) — the deliverable runs locally via Docker
 - Real-time updates (e.g., WebSockets/SignalR)
@@ -326,7 +324,7 @@ Lists the current user's non-deleted tasks, with optional filtering and sorting 
 | Param | Allowed values | Default |
 |---|---|---|
 | `status` | `Todo`, `InProgress`, `Done` | none (no filter — all statuses returned) |
-| `sortBy` | `dueDate`, `priority`, `createdAt` | `createdAt` |
+| `sortBy` | `dueDate`, `priority`, `createdAt`, `title` | `createdAt` |
 | `sortOrder` | `asc`, `desc` | `desc` |
 
 Example: `GET /api/tasks?status=InProgress&sortBy=dueDate&sortOrder=asc`
@@ -470,6 +468,42 @@ This check lives in the **Service layer**, not the controller and not the reposi
 
 This placement means the ownership rule is enforced in exactly one place, is unit-testable in isolation (Section 10), and can't be accidentally bypassed by adding a new controller action that forgets the check.
 
+### Timing-safe login
+
+The login endpoint intentionally returns the same error message (`"Invalid username or password."`) whether the username doesn't exist or the password is wrong — this avoids leaking which usernames are registered. However, the **error message alone is not sufficient**: if the hash comparison is skipped for non-existent users, the response time becomes a side-channel that still reveals username existence.
+
+**The problem**: C#'s `||` short-circuits. A naïve implementation like:
+
+```csharp
+if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)
+```
+
+…skips `VerifyHashedPassword` when `user is null`. PBKDF2 with ~210,000 iterations takes ~100–300 ms. A non-existent username returns in ~5 ms (just a DB lookup). Despite the identical error text, an attacker can enumerate valid usernames purely from response timing.
+
+**The fix**: always run the hash comparison, regardless of whether the user was found, using a pre-computed static dummy hash:
+
+```csharp
+// Computed once at class initialization; never stored or authenticated against.
+private static readonly string DummyHash =
+    new PasswordHasher<User>().HashPassword(new User(), "dummy");
+
+public async Task<AuthResponse> LoginAsync(LoginRequest request)
+{
+    var user = await userRepo.GetByUsernameAsync(request.Username);
+    var hashToVerify = user?.PasswordHash ?? DummyHash;
+    var result = hasher.VerifyHashedPassword(user ?? new User(), hashToVerify, request.Password);
+
+    if (user is null || result == PasswordVerificationResult.Failed)
+        throw new UnauthorizedException("Invalid username or password.");
+
+    return BuildAuthResponse(user);
+}
+```
+
+The PBKDF2 computation now always executes, making the timing indistinguishable between a non-existent username and a wrong password. The dummy hash is a real PBKDF2-formatted hash string (not an arbitrary constant), so the computation path is identical to a real verification.
+
+Note: this reduces but does not eliminate timing variation — network jitter and DB query time still vary. True timing-safe login at scale would also require adding deliberate jitter or a minimum response delay, but that is out of scope for this MVP.
+
 ### Hard rule: never trust a client-supplied user ID
 No request body or query parameter ever contains a `userId` field that the backend trusts for identifying *whose* data to act on (note: this is distinct from `Task.UserId`, the internal foreign key). The current user's ID is **always** derived from the validated JWT on the server side. This prevents a client from passing another user's ID and accessing their data. The API contract in Section 5 reflects this — no task request body includes a `userId` field.
 
@@ -600,6 +634,8 @@ Real EF Core Code-First migrations are used — not `EnsureCreated()`. The initi
 
 ### Request validation
 Request DTOs use **Data Annotations** (`[Required]`, `[MaxLength]`, etc.) combined with ASP.NET Core's built-in automatic model validation. When model validation fails, it's translated into the standardized `VALIDATION_ERROR` response shape (Section 5) with field-level `details`, via the global exception/validation handling described below — not via repeated manual `if (!ModelState.IsValid)` checks in every controller action.
+
+One case worth calling out explicitly: **`LoginRequest.Password` carries a `[MaxLength(200)]` annotation**. Without an upper bound, a malicious client could submit an arbitrarily long password string and force the server to run the full PBKDF2 computation on it — an inexpensive client-side request that consumes meaningful server-side CPU. The cap is set high enough to never affect legitimate use while making hash-computation DoS impractical. (`RegisterRequest.Password` has the same bound for the same reason.)
 
 ### Custom exceptions and error mapping
 Business-rule errors are represented as small custom exception types, thrown from the Service layer and translated into HTTP responses in one place:
@@ -800,7 +836,7 @@ This section specifies what the final `README.md` (at the repo root) must contai
 5. **Architecture Overview** — a brief summary (a few sentences, can reuse the Mermaid diagram from Section 3) of the layered backend and the frontend's composable-based structure.
 6. **Assumptions** — pulled from Section 12, stated concisely.
 7. **Trade-offs** — pulled from Section 12, stated concisely.
-8. **Known Limitations** — things a reviewer should know *while using the app right now* (e.g., "sessions expire after 1 hour with no refresh — you'll need to log in again," "no password reset exists"). Distinct from Future Work below: limitations describe present behavior; future work describes things not built yet.
+8. **Known Limitations** — things a reviewer should know *while using the app right now* (e.g., "sessions expire after 1 hour with no refresh — you'll need to log in again," "no password reset exists," "the Docker setup uses plain HTTP — passwords and tokens are not encrypted in transit locally"). Distinct from Future Work below: limitations describe present behavior; future work describes things not built yet.
 9. **Scalability & Future Work** — pulled from Section 13, reframed briefly as "if this needed to scale / continue" commentary (e.g., SQLite → a real production database, pagination, logging/observability, rate limiting).
 
 ### Demo user / seed data
@@ -841,6 +877,8 @@ This section consolidates every assumption and trade-off referenced throughout t
 - **Demo JWT secret baked into `docker-compose.yml`** — chosen for zero-friction local review, explicitly not how a real production secret should be handled (would use a managed secrets store); called out with an inline comment in the compose file itself.
 - **No API versioning scheme (e.g., `/api/v1/...`)** — acceptable since this API has a single first-party consumer (this app's own frontend); would revisit before any external/third-party consumer depended on the API, since breaking changes would then need a versioning strategy.
 - **No rate limiting on auth endpoints** — acceptable for this exercise; a real production deployment would add brute-force login protection (e.g., rate limiting or account lockout after repeated failures) before going live.
+- **HTTP-only Docker setup (no TLS)** — the Docker Compose configuration serves everything over plain HTTP; passwords and JWT tokens are unencrypted in transit locally. Acceptable for a local review environment where traffic never leaves the machine; a production deployment would terminate TLS at a reverse proxy or load balancer in front of the services.
+- **`LoginRequest.Password` max length cap** — the login DTO applies a `[MaxLength(200)]` annotation to bound the password field. Without it, a client could submit an arbitrarily long string and force a full PBKDF2 computation, using server CPU cheaply. The cap is high enough to never affect real passwords while preventing this attack.
 
 ## 13. Future Work / Production Considerations
 
@@ -878,17 +916,15 @@ This is called out with extra depth since it's explicitly part of the evaluation
 
 ## 14. Implementation Progress Checklist
 
-This checklist exists so implementation can pause and resume across sessions (e.g., if a Claude Code session runs low on context) without losing track of state. Items are ordered roughly by dependency — backend foundation before backend endpoints, backend before frontend, everything before Docker/docs.
+This checklist tracks implementation progress. Items are ordered roughly by dependency — backend foundation before backend endpoints, backend before frontend, everything before Docker/docs.
 
 **This spec is the source of truth.** If an implementation decision ends up diverging from what's written above (e.g., a different default value, a slightly different folder name, an endpoint behaving differently than specified), update the relevant section of this spec to reflect what was actually built — don't let the spec go stale. A future session (or a human reviewer) should be able to trust this document as an accurate description of the system, not just the original plan.
 
 ### Session Notes
 *(Update this block at the end of each work session: 2–3 sentences on current state, what's next, and any blockers. Overwrite previous notes — this reflects the latest state, not a log.)*
 
-> **Last updated:** 2026-06-27
-> **Status:** All implementation complete on branch `feature/backend-foundation`. Backend (Task CRUD, tests, cross-cutting), frontend (all views/components/composables), Docker Compose, and README are done. 30/30 tests passing (22 unit + 8 integration).
-> **Next step:** Verify `docker-compose up --build` end-to-end from a clean clone, then push branch, open PR, and get repo link ready for submission.
-> **Blockers:** None.
+> **Last updated:** 2026-06-29
+> **Status:** All implementation complete. 33/33 tests passing (25 unit + 8 integration). `docker-compose up --build` verified end-to-end. Ready for submission.
 
 ### Checklist
 
@@ -980,7 +1016,7 @@ This checklist exists so implementation can pause and resume across sessions (e.
 - [x] Frontend `Dockerfile` (multi-stage, nginx, with SPA fallback routing — Section 9)
 - [x] `docker-compose.yml` with both services, named volume, healthcheck (Section 9)
 - [x] `.env.example` committed (Section 9)
-- [ ] Verified `docker-compose up --build` works end-to-end from a clean clone
+- [X] Verified `docker-compose up --build` works end-to-end from a clean clone
 
 **Docker & Infra — Summary (completed 2026-06-27)**
 - `TodoApp.Api/Dockerfile`: multi-stage (`sdk:9.0` → `aspnet:9.0`), copies `.csproj` first for layer caching, `dotnet publish -c Release`.
@@ -995,5 +1031,5 @@ This checklist exists so implementation can pause and resume across sessions (e.
 - [x] This spec reviewed and updated for any decisions that diverged during implementation
 
 **Final Submission**
-- [ ] Repo pushed to GitHub, both frontend/backend present
-- [ ] Repo link ready to submit
+- [X] Repo pushed to GitHub, both frontend/backend present
+- [X] Repo link ready to submit
