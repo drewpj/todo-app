@@ -40,6 +40,23 @@ public class TaskServiceTests
     }
 
     [Fact]
+    public async Task Create_EmptyTitle_ThrowsValidationException()
+    {
+        var (svc, _) = CreateService();
+        var ex = await Assert.ThrowsAsync<ValidationException>(() =>
+            svc.CreateAsync(new TaskRequest { Title = "", Status = TaskStatus.Todo, Priority = TaskPriority.Medium }, userId: 1));
+        Assert.Equal("VALIDATION_ERROR", ex.Code);
+    }
+
+    [Fact]
+    public async Task Create_TitleTooLong_ThrowsValidationException()
+    {
+        var (svc, _) = CreateService();
+        await Assert.ThrowsAsync<ValidationException>(() =>
+            svc.CreateAsync(new TaskRequest { Title = new string('x', 201), Status = TaskStatus.Todo, Priority = TaskPriority.Medium }, userId: 1));
+    }
+
+    [Fact]
     public async Task Create_ExplicitStatusAndPriority_StoredCorrectly()
     {
         var (svc, _) = CreateService();

@@ -45,7 +45,7 @@ public class AuthIntegrationTests(TestWebAppFactory factory) : IClassFixture<Tes
     }
 
     [Fact]
-    public async Task Register_EmptyTitle_Returns400WithFieldDetails()
+    public async Task Register_InvalidInput_Returns400WithFieldDetails()
     {
         var response = await _client.PostAsJsonAsync("/api/auth/register",
             new { username = "", password = "x" });

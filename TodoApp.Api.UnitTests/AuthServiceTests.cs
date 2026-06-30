@@ -36,6 +36,15 @@ public class AuthServiceTests
     }
 
     [Fact]
+    public async Task Register_ShortPassword_ThrowsValidationException()
+    {
+        var svc = CreateService();
+        var ex = await Assert.ThrowsAsync<ValidationException>(() =>
+            svc.RegisterAsync(new RegisterRequest { Username = "alice", Password = "abc" }));
+        Assert.Equal("VALIDATION_ERROR", ex.Code);
+    }
+
+    [Fact]
     public async Task Register_DuplicateUsername_ThrowsConflict()
     {
         var repo = new FakeUserRepository();

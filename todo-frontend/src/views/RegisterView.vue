@@ -44,7 +44,7 @@ async function handleSubmit() {
   loading.value = true
   try {
     await register(username.value, password.value)
-    router.push('/tasks')
+    router.push('/')
   } catch (e: unknown) {
     if (e instanceof ApiError && e.details?.length) {
       e.details.forEach(d => { fieldErrors[d.field.toLowerCase()] = d.message })

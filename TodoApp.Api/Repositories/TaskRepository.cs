@@ -25,6 +25,9 @@ public class TaskRepository(AppDbContext db) : ITaskRepository
             ("priority",  "asc")  => query.OrderBy(t => t.Priority),
             ("priority",  "desc") => query.OrderByDescending(t => t.Priority),
             ("createdAt", "asc")  => query.OrderBy(t => t.CreatedAt),
+            ("createdAt", "desc") => query.OrderByDescending(t => t.CreatedAt),
+            ("title",     "asc")  => query.OrderBy(t => t.Title),
+            ("title",     "desc") => query.OrderByDescending(t => t.Title),
             _                     => query.OrderByDescending(t => t.CreatedAt)
         };
 

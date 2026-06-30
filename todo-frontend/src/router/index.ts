@@ -7,10 +7,9 @@ import TaskListView from '../views/TaskListView.vue'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/tasks' },
+    { path: '/', component: TaskListView, meta: { requiresAuth: true } },
     { path: '/login', component: LoginView },
     { path: '/register', component: RegisterView },
-    { path: '/tasks', component: TaskListView, meta: { requiresAuth: true } },
   ],
 })
 
@@ -20,7 +19,7 @@ router.beforeEach((to) => {
     return '/login'
   }
   if ((to.path === '/login' || to.path === '/register') && user.value) {
-    return '/tasks'
+    return '/'
   }
 })
 

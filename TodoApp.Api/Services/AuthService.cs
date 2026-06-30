@@ -15,8 +15,15 @@ public class AuthService(
     PasswordHasher<User> hasher,
     IConfiguration config) : IAuthService
 {
+    // Computed once; used only to equalize timing when the username doesn't exist.
+    private static readonly string DummyHash =
+        new PasswordHasher<User>().HashPassword(new User(), "dummy");
+
     public async Task<AuthResponse> RegisterAsync(RegisterRequest request)
     {
+        if (request.Password.Length < 6)
+            throw new ValidationException("password", "Password must be at least 6 characters.");
+
         if (await userRepo.GetByUsernameAsync(request.Username) is not null)
             throw new ConflictException("DUPLICATE_USERNAME", "Username is already taken.");
 
@@ -30,7 +37,10 @@ public class AuthService(
     public async Task<AuthResponse> LoginAsync(LoginRequest request)
     {
         var user = await userRepo.GetByUsernameAsync(request.Username);
-        if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)
+        var hashToVerify = user?.PasswordHash ?? DummyHash;
+        var result = hasher.VerifyHashedPassword(user ?? new User(), hashToVerify, request.Password);
+
+        if (user is null || result == PasswordVerificationResult.Failed)
             throw new UnauthorizedException("Invalid username or password.");
 
         return BuildAuthResponse(user);

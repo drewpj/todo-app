@@ -1,10 +1,11 @@
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import type { User } from '../types/api'
 import { api } from '../lib/apiClient'
 import type { AuthResponse } from '../types/api'
 
 const user = ref<User | null>(null)
 const token = ref<string | null>(null)
+const isAuthenticated = computed(() => user.value !== null)
 
 export function useAuth() {
   async function register(username: string, password: string): Promise<void> {
@@ -39,5 +40,5 @@ export function useAuth() {
     }
   }
 
-  return { user, token, register, login, logout, restoreSession }
+  return { user, token, isAuthenticated, register, login, logout, restoreSession }
 }

@@ -63,6 +63,12 @@ public class TaskLifecycleTests(TestWebAppFactory factory) : IClassFixture<TestW
         var updated = await updateResp.Content.ReadFromJsonAsync<TaskResponse>(JsonOpts);
         Assert.Equal("Done", updated!.Status.ToString());
 
+        // Get — verify update is reflected
+        var getAfterUpdateResp = await client.GetAsync($"/api/tasks/{created.Id}");
+        Assert.Equal(HttpStatusCode.OK, getAfterUpdateResp.StatusCode);
+        var fetched = await getAfterUpdateResp.Content.ReadFromJsonAsync<TaskResponse>(JsonOpts);
+        Assert.Equal("Done", fetched!.Status.ToString());
+
         // Delete (soft)
         var deleteResp = await client.DeleteAsync($"/api/tasks/{created.Id}");
         Assert.Equal(HttpStatusCode.NoContent, deleteResp.StatusCode);

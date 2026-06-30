@@ -40,7 +40,7 @@ async function handleSubmit() {
   loading.value = true
   try {
     await login(username.value, password.value)
-    router.push('/tasks')
+    router.push('/')
   } catch (e: unknown) {
     errorMsg.value = e instanceof ApiError ? e.message : 'Login failed'
   } finally {

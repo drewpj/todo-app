@@ -43,6 +43,7 @@ public class TaskService(ITaskRepository taskRepo) : ITaskService
 
     public async Task<TaskResponse> CreateAsync(TaskRequest request, int userId)
     {
+        ValidateTitle(request.Title);
         var now = DateTime.UtcNow;
         var task = new TaskItem
         {
@@ -61,6 +62,7 @@ public class TaskService(ITaskRepository taskRepo) : ITaskService
 
     public async Task<TaskResponse> UpdateAsync(int taskId, TaskRequest request, int userId)
     {
+        ValidateTitle(request.Title);
         var task = await GetOwnedTaskAsync(taskId, userId);
 
         task.Title = request.Title;
@@ -80,6 +82,14 @@ public class TaskService(ITaskRepository taskRepo) : ITaskService
         task.IsDeleted = true;
         task.UpdatedAt = DateTime.UtcNow;
         await taskRepo.UpdateAsync(task);
+    }
+
+    private static void ValidateTitle(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ValidationException("title", "Title is required.");
+        if (title.Length > 200)
+            throw new ValidationException("title", "Title cannot exceed 200 characters.");
     }
 
     // Returns 404 whether the task doesn't exist, is soft-deleted, or belongs to another user,
