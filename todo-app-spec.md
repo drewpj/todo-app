@@ -3,9 +3,7 @@
 ## 1. Overview & Goals
 
 ### Purpose of this document
-This is an implementation specification for a take-home coding exercise. It is written primarily **for an implementing coding agent** (e.g., Claude Code) to build the application end-to-end with minimal need for clarifying questions. All architecture, data model, and API decisions below are intentionally explicit and final for this version of the spec — ambiguities encountered during implementation should default to the choices documented here rather than agent judgment. Where a decision was deliberately deferred or simplified, that is called out explicitly in **Section 12 (Assumptions & Trade-offs)** and/or **Section 13 (Future Work)**, so a human reviewer can see that it was a conscious choice rather than an oversight.
-
-Secondary audiences are the person commissioning this work (who may review or resume implementation across sessions) and, ultimately, the technical reviewers at the hiring company who will read the resulting code and README.
+This is the design and implementation specification for a multi-user to-do task management app. It documents the full API contract, data model, architecture decisions, testing strategy, and key trade-offs made during development. All major decisions are recorded here with their rationale so that every non-obvious choice is explicit and traceable. Where a decision was deliberately deferred or simplified, that is called out in **Section 12 (Assumptions & Trade-offs)** and/or **Section 13 (Future Work)**, so a reviewer can see it was a conscious choice rather than an oversight.
 
 ### What we're building
 A small multi-user to-do task management application: users can register, log in, and manage their own list of tasks (create, read, update, delete, mark complete) via a Vue frontend communicating with a .NET Core Web API backend, persisted in SQLite via EF Core.
@@ -71,7 +69,7 @@ Prefer simple, defensible decisions that are clearly explained over complex ones
 - Pagination on the task list (filtering and sorting are in scope; pagination is deferred)
 
 **Operations & Infrastructure**
-- Centralized logging / observability tooling (e.g., Serilog, Application Insights) — logging is discussed as a future consideration in the README, but not implemented
+- Centralized logging sink / observability tooling (e.g., Serilog, Application Insights) — per-request structured logging (correlationId, traceId, method, path, status, elapsed) is implemented via custom middleware; what is deferred is shipping those log lines to an external sink or aggregation platform
 - Rate limiting / throttling
 - Real production deployment (cloud hosting, CI/CD pipeline) — the deliverable runs locally via Docker
 - Real-time updates (e.g., WebSockets/SignalR)
@@ -326,7 +324,7 @@ Lists the current user's non-deleted tasks, with optional filtering and sorting 
 | Param | Allowed values | Default |
 |---|---|---|
 | `status` | `Todo`, `InProgress`, `Done` | none (no filter — all statuses returned) |
-| `sortBy` | `dueDate`, `priority`, `createdAt` | `createdAt` |
+| `sortBy` | `dueDate`, `priority`, `createdAt`, `title` | `createdAt` |
 | `sortOrder` | `asc`, `desc` | `desc` |
 
 Example: `GET /api/tasks?status=InProgress&sortBy=dueDate&sortOrder=asc`
@@ -470,6 +468,42 @@ This check lives in the **Service layer**, not the controller and not the reposi
 
 This placement means the ownership rule is enforced in exactly one place, is unit-testable in isolation (Section 10), and can't be accidentally bypassed by adding a new controller action that forgets the check.
 
+### Timing-safe login
+
+The login endpoint intentionally returns the same error message (`"Invalid username or password."`) whether the username doesn't exist or the password is wrong — this avoids leaking which usernames are registered. However, the **error message alone is not sufficient**: if the hash comparison is skipped for non-existent users, the response time becomes a side-channel that still reveals username existence.
+
+**The problem**: C#'s `||` short-circuits. A naïve implementation like:
+
+```csharp
+if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)
+```
+
+…skips `VerifyHashedPassword` when `user is null`. PBKDF2 with ~210,000 iterations takes ~100–300 ms. A non-existent username returns in ~5 ms (just a DB lookup). Despite the identical error text, an attacker can enumerate valid usernames purely from response timing.
+
+**The fix**: always run the hash comparison, regardless of whether the user was found, using a pre-computed static dummy hash:
+
+```csharp
+// Computed once at class initialization; never stored or authenticated against.
+private static readonly string DummyHash =
+    new PasswordHasher<User>().HashPassword(new User(), "dummy");
+
+public async Task<AuthResponse> LoginAsync(LoginRequest request)
+{
+    var user = await userRepo.GetByUsernameAsync(request.Username);
+    var hashToVerify = user?.PasswordHash ?? DummyHash;
+    var result = hasher.VerifyHashedPassword(user ?? new User(), hashToVerify, request.Password);
+
+    if (user is null || result == PasswordVerificationResult.Failed)
+        throw new UnauthorizedException("Invalid username or password.");
+
+    return BuildAuthResponse(user);
+}
+```
+
+The PBKDF2 computation now always executes, making the timing indistinguishable between a non-existent username and a wrong password. The dummy hash is a real PBKDF2-formatted hash string (not an arbitrary constant), so the computation path is identical to a real verification.
+
+Note: this reduces but does not eliminate timing variation — network jitter and DB query time still vary. True timing-safe login at scale would also require adding deliberate jitter or a minimum response delay, but that is out of scope for this MVP.
+
 ### Hard rule: never trust a client-supplied user ID
 No request body or query parameter ever contains a `userId` field that the backend trusts for identifying *whose* data to act on (note: this is distinct from `Task.UserId`, the internal foreign key). The current user's ID is **always** derived from the validated JWT on the server side. This prevents a client from passing another user's ID and accessing their data. The API contract in Section 5 reflects this — no task request body includes a `userId` field.
 
@@ -547,7 +581,9 @@ const {
 Each action calls the corresponding API endpoint (Section 5), updates `isLoading`/`error` appropriately, and refreshes `tasks` on success.
 
 ### API communication
-A small shared fetch wrapper (e.g., `apiClient.js`) centralizes: base URL configuration, attaching the `Authorization: Bearer <token>` header (reading from `useAuth()`/localStorage), and parsing the standardized error shape (Section 5) into a consistent JS error object. Both composables use this wrapper rather than calling `fetch` directly, so header/error-handling logic isn't duplicated.
+A small shared fetch wrapper (e.g., `apiClient.js`) centralizes: base URL configuration, attaching the `Authorization: Bearer <token>` header (reading from `useAuth()`/localStorage), generating and attaching a per-request `X-Correlation-Id` header, and parsing the standardized error shape (Section 5) into a consistent JS error object. Both composables use this wrapper rather than calling `fetch` directly, so header/error-handling logic isn't duplicated.
+
+**Correlation ID on outbound requests**: the fetch wrapper generates a UUID via `crypto.randomUUID()` for every API call and sends it as `X-Correlation-Id`. The backend middleware reads this header and uses it as the `correlationId` for all log entries and the error response body (Section 8 — Request logging). This means if the frontend logs or surfaces the correlationId from an error response, a developer can grep backend logs for that exact ID and find the corresponding request immediately. One UUID is generated per API call (not per user action); this is sufficient since no single user action fans out to multiple parallel requests.
 
 ### UI states
 For the task list and forms, the following states are required (cheap to implement, expected for "production-ready" framing):
@@ -599,6 +635,8 @@ Real EF Core Code-First migrations are used — not `EnsureCreated()`. The initi
 ### Request validation
 Request DTOs use **Data Annotations** (`[Required]`, `[MaxLength]`, etc.) combined with ASP.NET Core's built-in automatic model validation. When model validation fails, it's translated into the standardized `VALIDATION_ERROR` response shape (Section 5) with field-level `details`, via the global exception/validation handling described below — not via repeated manual `if (!ModelState.IsValid)` checks in every controller action.
 
+One case worth calling out explicitly: **`LoginRequest.Password` carries a `[MaxLength(200)]` annotation**. Without an upper bound, a malicious client could submit an arbitrarily long password string and force the server to run the full PBKDF2 computation on it — an inexpensive client-side request that consumes meaningful server-side CPU. The cap is set high enough to never affect legitimate use while making hash-computation DoS impractical. (`RegisterRequest.Password` has the same bound for the same reason.)
+
 ### Custom exceptions and error mapping
 Business-rule errors are represented as small custom exception types, thrown from the Service layer and translated into HTTP responses in one place:
 
@@ -612,6 +650,34 @@ Business-rule errors are represented as small custom exception types, thrown fro
 
 ### Global error handling
 Implemented using ASP.NET Core's `IExceptionHandler` (the modern .NET 8+ pattern), registered once in `Program.cs`. This single handler catches the custom exceptions above (and any unhandled exception, mapped to a generic 500) and produces the standardized error response shape from Section 5, including `traceId` (from `HttpContext.TraceIdentifier`) and `correlationId` (echoed from the `X-Correlation-Id` header or generated). No controller contains its own try/catch for these cases.
+
+Every exception processed by the handler is logged at `Warning` level (for handled app exceptions) or `Error` level (for unhandled 500s), including both `traceId` and `correlationId` as structured log fields alongside the HTTP status code and error code. This means every error response the client receives can be cross-referenced to a server log line by either ID.
+
+### Request logging
+
+To trace the full path of a request through the system, a custom `RequestLoggingMiddleware` class is registered in `Program.cs` early in the pipeline (before auth and routing). It is responsible for:
+
+1. **Resolving the correlationId** — reads `X-Correlation-Id` from the incoming request header; if absent, generates a new UUID. Stores it on `HttpContext.Items` so downstream code (including the exception handler) can retrieve it without re-reading the header.
+2. **Logging request start** — emits a structured log at `Information` level with: HTTP method, path, `traceId` (`HttpContext.TraceIdentifier`), `correlationId`.
+3. **Calling `next()`** — passes control down the pipeline.
+4. **Logging request end** — after `next()` returns, emits a structured log at `Information` level with: HTTP method, path, response status code, elapsed milliseconds, `traceId`, `correlationId`.
+
+Log fields use consistent names (`traceId`, `correlationId`, `method`, `path`, `statusCode`, `elapsedMs`) so the entries are grep-able in Docker logs and forward-compatible with a structured logging sink (Section 13).
+
+Example log output for a successful request:
+```
+info: RequestLoggingMiddleware  Request  POST /api/auth/login traceId=0HN...:00000001 correlationId=a1b2-...
+info: RequestLoggingMiddleware  Response POST /api/auth/login 200 42ms traceId=0HN...:00000001 correlationId=a1b2-...
+```
+
+Example for a failed request (the middleware log line is followed by the exception handler's warning):
+```
+info:  RequestLoggingMiddleware  Request  GET /api/tasks/999 traceId=0HN...:00000002 correlationId=b2c3-...
+warn:  GlobalExceptionHandler    NOT_FOUND 404 GET /api/tasks/999 traceId=0HN...:00000002 correlationId=b2c3-...
+info:  RequestLoggingMiddleware  Response GET /api/tasks/999 404 5ms traceId=0HN...:00000002 correlationId=b2c3-...
+```
+
+**What this does not replace**: ASP.NET Core's built-in host-level request logging (`Microsoft.AspNetCore.Hosting`) still runs — it logs the same request/response at its own level. If the noise is unwanted, suppress it in `appsettings.json` by setting `Microsoft.AspNetCore.Hosting` log level to `Warning`. The custom middleware is the authoritative source of per-request context (correlationId, traceId) in structured fields; the built-in log does not include those.
 
 ### Demo data seeding (important — do not use `HasData`)
 The demo user and sample tasks (Section 11) must be seeded by running real application logic in `Program.cs` at startup, **after** the DI container is built and **after** migrations are applied — not via EF Core's `HasData()` in `OnModelCreating`.
@@ -638,9 +704,10 @@ Kept as wire-up only, no business logic:
 4. Configure the CORS policy (Section 3) to allow the frontend's origin
 5. Register the global exception handler (`IExceptionHandler`)
 6. Register Swagger/OpenAPI generation (`Swashbuckle.AspNetCore`), including JWT Bearer support in the Swagger UI
-7. Apply pending EF Core migrations on startup (`db.Database.Migrate()`)
-8. Seed a demo user (and a few sample tasks) on startup if none exists, via a DI scope resolved **after** migration — never via `HasData()` (see "Demo data seeding" above; full content requirements in Section 11)
-9. Map controllers, run the app
+7. Register `RequestLoggingMiddleware` early in the pipeline (before auth and routing) — see "Request logging" above
+8. Apply pending EF Core migrations on startup (`db.Database.Migrate()`)
+9. Seed a demo user (and a few sample tasks) on startup if none exists, via a DI scope resolved **after** migration — never via `HasData()` (see "Demo data seeding" above; full content requirements in Section 11)
+10. Map controllers, run the app
 
 ## 9. Docker & Local Setup
 
@@ -769,7 +836,7 @@ This section specifies what the final `README.md` (at the repo root) must contai
 5. **Architecture Overview** — a brief summary (a few sentences, can reuse the Mermaid diagram from Section 3) of the layered backend and the frontend's composable-based structure.
 6. **Assumptions** — pulled from Section 12, stated concisely.
 7. **Trade-offs** — pulled from Section 12, stated concisely.
-8. **Known Limitations** — things a reviewer should know *while using the app right now* (e.g., "sessions expire after 1 hour with no refresh — you'll need to log in again," "no password reset exists"). Distinct from Future Work below: limitations describe present behavior; future work describes things not built yet.
+8. **Known Limitations** — things a reviewer should know *while using the app right now* (e.g., "sessions expire after 1 hour with no refresh — you'll need to log in again," "no password reset exists," "the Docker setup uses plain HTTP — passwords and tokens are not encrypted in transit locally"). Distinct from Future Work below: limitations describe present behavior; future work describes things not built yet.
 9. **Scalability & Future Work** — pulled from Section 13, reframed briefly as "if this needed to scale / continue" commentary (e.g., SQLite → a real production database, pagination, logging/observability, rate limiting).
 
 ### Demo user / seed data
@@ -810,6 +877,8 @@ This section consolidates every assumption and trade-off referenced throughout t
 - **Demo JWT secret baked into `docker-compose.yml`** — chosen for zero-friction local review, explicitly not how a real production secret should be handled (would use a managed secrets store); called out with an inline comment in the compose file itself.
 - **No API versioning scheme (e.g., `/api/v1/...`)** — acceptable since this API has a single first-party consumer (this app's own frontend); would revisit before any external/third-party consumer depended on the API, since breaking changes would then need a versioning strategy.
 - **No rate limiting on auth endpoints** — acceptable for this exercise; a real production deployment would add brute-force login protection (e.g., rate limiting or account lockout after repeated failures) before going live.
+- **HTTP-only Docker setup (no TLS)** — the Docker Compose configuration serves everything over plain HTTP; passwords and JWT tokens are unencrypted in transit locally. Acceptable for a local review environment where traffic never leaves the machine; a production deployment would terminate TLS at a reverse proxy or load balancer in front of the services.
+- **`LoginRequest.Password` max length cap** — the login DTO applies a `[MaxLength(200)]` annotation to bound the password field. Without it, a client could submit an arbitrarily long string and force a full PBKDF2 computation, using server CPU cheaply. The cap is high enough to never affect real passwords while preventing this attack.
 
 ## 13. Future Work / Production Considerations
 
@@ -847,75 +916,120 @@ This is called out with extra depth since it's explicitly part of the evaluation
 
 ## 14. Implementation Progress Checklist
 
-This checklist exists so implementation can pause and resume across sessions (e.g., if a Claude Code session runs low on context) without losing track of state. Items are ordered roughly by dependency — backend foundation before backend endpoints, backend before frontend, everything before Docker/docs.
+This checklist tracks implementation progress. Items are ordered roughly by dependency — backend foundation before backend endpoints, backend before frontend, everything before Docker/docs.
 
 **This spec is the source of truth.** If an implementation decision ends up diverging from what's written above (e.g., a different default value, a slightly different folder name, an endpoint behaving differently than specified), update the relevant section of this spec to reflect what was actually built — don't let the spec go stale. A future session (or a human reviewer) should be able to trust this document as an accurate description of the system, not just the original plan.
 
 ### Session Notes
 *(Update this block at the end of each work session: 2–3 sentences on current state, what's next, and any blockers. Overwrite previous notes — this reflects the latest state, not a log.)*
 
-> **Last updated:** _(not yet started)_
-> **Status:** _(not yet started)_
-> **Next step:** _(not yet started)_
-> **Blockers:** _(none yet)_
+> **Last updated:** 2026-06-29
+> **Status:** All implementation complete. 33/33 tests passing (25 unit + 8 integration). `docker-compose up --build` verified end-to-end. Ready for submission.
 
 ### Checklist
 
 **Backend Foundation**
-- [ ] .NET 9 Web API project scaffolded (Section 8 folder structure)
-- [ ] EF Core + SQLite configured, `AppDbContext` created (Section 4, Section 8)
-- [ ] `User` and `TaskItem` entities + Fluent API configurations (Section 4, Section 8)
-- [ ] Initial migration generated and committed (Section 8)
+- [x] .NET 9 Web API project scaffolded (Section 8 folder structure)
+- [x] EF Core + SQLite configured, `AppDbContext` created (Section 4, Section 8)
+- [x] `User` and `TaskItem` entities + Fluent API configurations (Section 4, Section 8)
+- [x] Initial migration generated and committed (Section 8)
+
+**Backend Foundation — Summary (completed 2026-06-26)**
+- Single `TodoApp.Api` project with all spec folders (`Controllers/`, `Services/`, `Repositories/`, `Models/`, `DTOs/`, `Data/Configurations/`, `Exceptions/`, `Migrations/`).
+- `User` and `TaskItem` entities with all spec fields; `TaskStatus`/`TaskPriority` enums (int-backed, as specified).
+- Fluent API configs (`UserConfiguration`, `TaskConfiguration`): unique index on `Username`, index on `TaskItem.UserId`, cascade delete, `IsDeleted` default `false`. `Status`/`Priority` defaults are C#-level (entity initializers) rather than DB column defaults — avoids EF sentinel-value ambiguity with 0-valued enum.
+- `AppDbContext` uses `ApplyConfigurationsFromAssembly`.
+- `InitialCreate` migration committed; `db.Database.Migrate()` called on startup.
+- No deviations from spec.
 
 **Auth**
-- [ ] Password hashing via `PasswordHasher<T>` (Section 6)
-- [ ] JWT generation/validation configured, incl. Issuer/Audience checks (Section 6)
-- [ ] `POST /api/auth/register` implemented (Section 5)
-- [ ] `POST /api/auth/login` implemented (Section 5)
-- [ ] `GET /api/auth/me` implemented (Section 5)
+- [x] Password hashing via `PasswordHasher<T>` (Section 6)
+- [x] JWT generation/validation configured, incl. Issuer/Audience checks (Section 6)
+- [x] `POST /api/auth/register` implemented (Section 5)
+- [x] `POST /api/auth/login` implemented (Section 5)
+- [x] `GET /api/auth/me` implemented (Section 5)
+
+**Auth — Summary (completed 2026-06-26)**
+- `AppException` base class with `Code` string; `NotFoundException`, `UnauthorizedException`, `ConflictException` subclasses throw from Service layer.
+- `GlobalExceptionHandler` (`IExceptionHandler`) maps exceptions to HTTP status codes and writes the Section 5 error shape (`code`, `message`, `details`, `traceId`, `correlationId`). `InvalidModelStateResponseFactory` configured so model-validation failures also use the same shape with `details` array.
+- JWT: HMAC-SHA256, `sub`+`username` claims, 1-hour expiry, `Issuer`/`Audience` validated. Key/issuer/audience from config (`Jwt:Secret`, `Jwt:Issuer`, `Jwt:Audience`). Dev defaults in `appsettings.json`; Docker env vars override them.
+- `PasswordHasher<User>` registered as Singleton and injected into `AuthService`; same hash path used for both registration and seeding.
+- **Deviation from spec (minor):** JWT middleware short-circuits the pipeline for missing/invalid tokens before `IExceptionHandler` is invoked, so a `JwtBearerEvents.OnChallenge` override was added in Program.cs to ensure those 401s also use the standardized error shape. This is not described in the spec but is necessary for consistent behavior.
+- Minimum password length: 6 characters (spec says "minimum-length only" without specifying the exact minimum; 6 is a common reasonable default).
 
 **Task CRUD**
-- [ ] `TaskService` with ownership enforcement (Section 6)
-- [ ] `GET /api/tasks` (filter/sort) implemented (Section 5)
-- [ ] `GET /api/tasks/{id}` implemented (Section 5)
-- [ ] `POST /api/tasks` implemented (Section 5)
-- [ ] `PUT /api/tasks/{id}` implemented (Section 5)
-- [ ] `DELETE /api/tasks/{id}` (soft delete) implemented (Section 5)
+- [x] `TaskService` with ownership enforcement (Section 6)
+- [x] `GET /api/tasks` (filter/sort) implemented (Section 5)
+- [x] `GET /api/tasks/{id}` implemented (Section 5)
+- [x] `POST /api/tasks` implemented (Section 5)
+- [x] `PUT /api/tasks/{id}` implemented (Section 5)
+- [x] `DELETE /api/tasks/{id}` (soft delete) implemented (Section 5)
+
+**Task CRUD — Summary (completed 2026-06-26)**
+- `ITaskRepository`/`TaskRepository`: IQueryable chain filtering by `UserId`+`!IsDeleted`, optional `status` filter, switch-expression sort on `createdAt`/`dueDate`/`priority`/`title` with `asc`/`desc` direction.
+- `ITaskService`/`TaskService`: `GetOwnedTaskAsync` helper returns 404 for non-existent, soft-deleted, or cross-user tasks (no resource-existence leakage). `DeleteAsync` sets `IsDeleted=true` + updates `UpdatedAt`. Query param validation throws `ValidationException`.
+- `TasksController`: class-level `[Authorize]`, `GetUserId()` helper reads from `ClaimTypes.NameIdentifier`. All five task endpoints.
+- `JsonStringEnumConverter` registered globally so `Status`/`Priority` serialize as strings.
+- UTC DateTime fix: `UtcDateTimeConverter` and `NullableUtcDateTimeConverter` in `AppDbContext.ConfigureConventions` ensure `Kind=Utc` on all DateTime reads from SQLite.
+- Demo user + 4 sample tasks seeded in `Program.cs` after `db.Database.Migrate()`.
 
 **Cross-cutting backend**
-- [ ] Global exception handler (`IExceptionHandler`) + standardized error shape, incl. `traceId`/`correlationId` (Section 5, Section 8)
-- [ ] Swagger/OpenAPI configured with JWT support (Section 8, Section 11)
-- [ ] CORS configured for frontend origin (Section 3)
-- [ ] Demo user + sample task seeding on startup (Section 11)
-- [ ] `/health` endpoint for Docker healthcheck (Section 9)
+- [x] Global exception handler (`IExceptionHandler`) + standardized error shape, incl. `traceId`/`correlationId` (Section 5, Section 8)
+- [x] Swagger/OpenAPI configured with JWT support (Section 8, Section 11)
+- [x] CORS configured for frontend origin (Section 3)
+- [x] Demo user + sample task seeding on startup (Section 11)
+- [x] `/health` endpoint for Docker healthcheck (Section 9)
 
 **Backend Tests**
-- [ ] `AuthService` unit tests (Section 10 test list)
-- [ ] `TaskService` unit tests (Section 10 test list)
-- [ ] Integration tests — full lifecycle + negative cases, using a correctly-scoped test database per Section 10's DB lifetime guidance
+- [x] `AuthService` unit tests (Section 10 test list)
+- [x] `TaskService` unit tests (Section 10 test list)
+- [x] Integration tests — full lifecycle + negative cases, using a correctly-scoped test database per Section 10's DB lifetime guidance
+
+**Backend Tests — Summary (completed 2026-06-26)**
+- `TodoApp.Api.UnitTests`: hand-written `FakeUserRepository` and `FakeTaskRepository` (in-memory, auto-incrementing IDs, same sort logic as real repo). 7 `AuthServiceTests` + 15 `TaskServiceTests` = 22 unit tests, all passing.
+- `TodoApp.Api.IntegrationTests`: `TestWebAppFactory` replaces DbContext with a temp-file SQLite database per startup. `AuthIntegrationTests` (5 tests) + `TaskLifecycleTests` (3 tests) = 8 integration tests, all passing. `JsonStringEnumConverter` required in test deserializer options.
+- `public partial class Program {}` added at end of `Program.cs` so `WebApplicationFactory<Program>` can access the class.
 
 **Frontend**
-- [ ] Vue 3 + TypeScript project scaffolded via Vite (npm), routing + navigation guards configured (Section 7)
-- [ ] `useAuth()` composable implemented (Section 7)
-- [ ] `useTasks()` composable implemented (Section 7)
-- [ ] `apiClient` wrapper implemented (Section 7)
-- [ ] `LoginView` / `RegisterView` implemented (Section 7)
-- [ ] `TaskListView` + `AppHeader` + `TaskFilters` + `TaskList` + `TaskItem` implemented (Section 7)
-- [ ] `TaskFormModal` (shared create/edit) implemented (Section 7)
-- [ ] Loading/empty/error states implemented (Section 7)
+- [x] Vue 3 + TypeScript project scaffolded via Vite (npm), routing + navigation guards configured (Section 7)
+- [x] `useAuth()` composable implemented (Section 7)
+- [x] `useTasks()` composable implemented (Section 7)
+- [x] `apiClient` wrapper implemented (Section 7)
+- [x] `LoginView` / `RegisterView` implemented (Section 7)
+- [x] `TaskListView` + `AppHeader` + `TaskFilters` + `TaskList` + `TaskItem` implemented (Section 7)
+- [x] `TaskFormModal` (shared create/edit) implemented (Section 7)
+- [x] Loading/empty/error states implemented (Section 7)
+
+**Frontend — Summary (completed 2026-06-27)**
+- `src/types/api.ts`: TypeScript interfaces/types for `User`, `Task`, `TaskRequest`, `AuthResponse`, `TaskListResponse`, `TaskStatus`, `TaskPriority`.
+- `src/lib/apiClient.ts`: fetch wrapper with auth header injection from localStorage, `ApiError` class for structured error access.
+- `src/composables/useAuth.ts`: module-level `user` and `token` refs (no Pinia); `register`, `login`, `logout`, `restoreSession` methods.
+- `src/composables/useTasks.ts`: module-level `tasks`, `isLoading`, `error` refs; `fetchTasks`, `createTask`, `updateTask`, `deleteTask`.
+- `src/router/index.ts`: `createWebHistory` router; `requiresAuth` meta guard redirects unauthenticated users to `/login`; logged-in users redirected away from `/login`/`/register`.
+- `App.vue` calls `restoreSession` on mount (validates stored token against `/api/auth/me`).
+- Views: `LoginView`, `RegisterView` (with per-field error display), `TaskListView` (filter/sort, new task button, delete confirm).
+- Components: `AppHeader` (logo, username, sign out), `TaskFilters` (status/sortBy/sortOrder selects), `TaskList`, `TaskItem` (overdue highlighting, status/priority badges), `TaskFormModal` (shared create/edit form).
+- `vite.config.ts`: explicit port 5173. `VITE_API_BASE_URL` env var controls API base URL.
 
 **Docker & Infra**
-- [ ] Backend `Dockerfile` (multi-stage) (Section 9)
-- [ ] Frontend `Dockerfile` (multi-stage, nginx, with SPA fallback routing — Section 9)
-- [ ] `docker-compose.yml` with both services, named volume, healthcheck (Section 9)
-- [ ] `.env.example` committed (Section 9)
-- [ ] Verified `docker-compose up --build` works end-to-end from a clean clone
+- [x] Backend `Dockerfile` (multi-stage) (Section 9)
+- [x] Frontend `Dockerfile` (multi-stage, nginx, with SPA fallback routing — Section 9)
+- [x] `docker-compose.yml` with both services, named volume, healthcheck (Section 9)
+- [x] `.env.example` committed (Section 9)
+- [X] Verified `docker-compose up --build` works end-to-end from a clean clone
+
+**Docker & Infra — Summary (completed 2026-06-27)**
+- `TodoApp.Api/Dockerfile`: multi-stage (`sdk:9.0` → `aspnet:9.0`), copies `.csproj` first for layer caching, `dotnet publish -c Release`.
+- `todo-frontend/Dockerfile`: multi-stage (`node:22-alpine` → `nginx:alpine`), accepts `VITE_API_BASE_URL` build arg, copies `nginx.conf`.
+- `todo-frontend/nginx.conf`: SPA fallback (`try_files $uri $uri/ /index.html`), 1-year cache headers for static assets.
+- `docker-compose.yml`: backend port 5000, frontend port 5173→80, `db_data` named volume, `wget`-based healthcheck, `depends_on: condition: service_healthy`.
+- `.env.example` at repo root with all overridable env vars; `.env` is gitignored.
 
 **Documentation**
-- [ ] `README.md` written per Section 11's required sections
-- [ ] Inline code comments added for non-obvious decisions (Section 11)
-- [ ] This spec reviewed and updated for any decisions that diverged during implementation
+- [x] `README.md` written per Section 11's required sections
+- [x] Inline code comments added for non-obvious decisions (Section 11)
+- [x] This spec reviewed and updated for any decisions that diverged during implementation
 
 **Final Submission**
-- [ ] Repo pushed to GitHub, both frontend/backend present
-- [ ] Repo link ready to submit
+- [X] Repo pushed to GitHub, both frontend/backend present
+- [X] Repo link ready to submit

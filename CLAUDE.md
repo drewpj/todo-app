@@ -44,17 +44,21 @@ Before implementing anything, read the relevant section(s) of `todo-app-spec.md`
 
 ## Commands
 
-Once scaffolded, this section should be filled in with the actual commands (e.g., `dotnet test`, `npm run test`, `docker-compose up --build`). Update it as soon as the projects exist — don't leave it as a placeholder past the first session.
-
 ```
-# Run everything locally:
+# Run everything (Docker Compose):
 docker-compose up --build
 
-# Backend tests:
-(TBD once backend project exists)
+# Backend only (dotnet):
+dotnet run --project TodoApp.Api
 
-# Frontend dev server (outside Docker, for faster iteration):
-(TBD once frontend project exists)
+# Backend tests (unit + integration):
+dotnet test
+
+# Frontend dev server (outside Docker):
+cd todo-frontend && npm run dev
+
+# Frontend build:
+cd todo-frontend && npm run build
 ```
 
 ## Testing expectations
